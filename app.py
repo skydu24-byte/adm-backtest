@@ -141,156 +141,6 @@ def _parse_int_list(text: str) -> list:
 # BUILD CONFIG & RUN
 # ══════════════════════════════════════════════════════════════════════════════
 
-if run_btn or "results" in st.session_state:
-
-    if run_btn:
-        # Build config from sidebar
-        cfg = ADMConfig(
-            strategy=strategy_key,
-            start_date=start_date.isoformat(),
-            end_date=end_date.isoformat() if end_date else None,
-            initial_capital=float(initial_capital),
-            transaction_cost=transaction_cost,
-            slippage=slippage,
-            benchmark=benchmark.strip() or "SPY",
-            verbose=False,
-            output_dir="output",
-        )
-
-        # Strategy-specific fields
-        if strategy_key == "adm":
-            cfg.risky_assets = _parse_list(risky) if risky.strip() else ["SPY", "SCZ"]
-            cfg.defensive_asset = defensive.strip() or "TLT"
-            if best_of.strip():
-                cfg.best_of_defensives = _parse_list(best_of)
-            cfg.momentum_windows_months = _parse_int_list(momentum_windows)
-
-        elif strategy_key == "enhanced_dm":
-            if multi_universe.strip():
-                cfg.multi_asset_universe = _parse_list(multi_universe)
-            cfg.enhanced_top_n = top_n
-            cfg.momentum_lookback_months = lookback
-
-        elif strategy_key == "managed_futures_dm":
-            if mf_risky.strip():
-                cfg.managed_futures_risky = _parse_list(mf_risky)
-            if mf_defensive.strip():
-                cfg.managed_futures_defensive = _parse_list(mf_defensive)
-            cfg.momentum_lookback_months = lookback
-
-        elif strategy_key == "vigilant_dm":
-            if v_risky.strip():
-                cfg.vigilant_risky = _parse_list(v_risky)
-            if v_def_rising.strip():
-                cfg.vigilant_defensive_rising = _parse_list(v_def_rising)
-            if v_def_falling.strip():
-                cfg.vigilant_defensive_falling = _parse_list(v_def_falling)
-            cfg.momentum_lookback_months = lookback
-
-        # Run
-        with st.spinner("Téléchargement des données et calcul en cours..."):
-            try:
-                portfolio_df, metrics = run_backtest(cfg)
-                st.session_state["results"] = (portfolio_df, metrics, cfg)
-            except Exception as e:
-                st.error(f"Erreur lors du backtest : {e}")
-                st.session_state.pop("results", None)
-                st.stop()
-
-    # ── Display results ──────────────────────────────────────────────────────
-    if "results" in st.session_state:
-        portfolio_df, metrics, cfg = st.session_state["results"]
-
-        # ── Metrics cards ──────────────────────────────────────────────────────
-        st.header("Résultats")
-        col1, col2, col3, col4, col5 = st.columns(5)
-
-        def _pct(v):
-            return f"{v:.2%}" if isinstance(v, float) else str(v)
-
-        def _ratio(v):
-            return f"{v:.3f}" if isinstance(v, float) else str(v)
-
-        with col1:
-            st.metric("CAGR", _pct(metrics.get("cagr", 0)))
-            st.metric("Rendement total", _pct(metrics.get("total_return", 0)))
-
-        with col2:
-            st.metric("Volatilité", _pct(metrics.get("volatility", 0)))
-            st.metric("Sharpe", _ratio(metrics.get("sharpe_ratio", 0)))
-
-        with col3:
-            st.metric("Sortino", _ratio(metrics.get("sortino_ratio", 0)))
-            st.metric("Calmar", _ratio(metrics.get("calmar_ratio", 0)))
-
-        with col4:
-            st.metric("Max Drawdown", _pct(metrics.get("max_drawdown", 0)))
-            st.metric(
-                "Durée DD (jours)",
-                int(metrics.get("max_drawdown_duration_days", 0)),
-            )
-
-        with col5:
-            st.metric("Trades", int(metrics.get("num_trades", 0)))
-            st.metric("Win Rate", _pct(metrics.get("win_rate", 0)))
-
-        st.markdown("---")
-
-        # ── Benchmarks comparison ─────────────────────────────────────────────
-        st.subheader("Comparaison Benchmark")
-        bcol1, bcol2, bcol3, bcol4 = st.columns(4)
-        with bcol1:
-            st.metric("Benchmark CAGR", _pct(metrics.get("bench_cagr", 0)))
-        with bcol2:
-            st.metric("Benchmark Return", _pct(metrics.get("bench_total_return", 0)))
-        with bcol3:
-            st.metric("Benchmark Vol", _pct(metrics.get("bench_volatility", 0)))
-        with bcol4:
-            st.metric("Benchmark Max DD", _pct(metrics.get("bench_max_drawdown", 0)))
-
-        st.markdown("---")
-
-        # ── Charts ────────────────────────────────────────────────────────────
-        st.header("Graphiques")
-
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(
-            ["Equity Curve", "Drawdown", "Distribution", "Heatmap", "Allocation"]
-        )
-
-        with tab1:
-            _plot_equity(portfolio_df, cfg)
-
-        with tab2:
-            _plot_drawdown(portfolio_df)
-
-        with tab3:
-            _plot_monthly_hist(portfolio_df)
-
-        with tab4:
-            _plot_heatmap(portfolio_df)
-
-        with tab5:
-            _plot_allocation(portfolio_df)
-
-        # ── Data export ──────────────────────────────────────────────────────
-        st.markdown("---")
-        st.header("Données")
-
-        csv_data = portfolio_df.to_csv().encode("utf-8")
-        st.download_button(
-            "📥 Télécharger portfolio_daily.csv",
-            data=csv_data,
-            file_name="portfolio_daily.csv",
-            mime="text/csv",
-        )
-
-        with st.expander("Afficher les données brutes"):
-            st.dataframe(portfolio_df.tail(30), use_container_width=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PLOTTING FUNCTIONS
-# ══════════════════════════════════════════════════════════════════════════════
 
 def _plot_equity(df: pd.DataFrame, cfg: ADMConfig):
     """Equity curve: portfolio vs benchmark."""
@@ -450,3 +300,155 @@ def _plot_allocation(df: pd.DataFrame):
         ),
     )
     st.plotly_chart(fig, use_container_width=True)
+
+
+if run_btn or "results" in st.session_state:
+
+    if run_btn:
+        # Build config from sidebar
+        cfg = ADMConfig(
+            strategy=strategy_key,
+            start_date=start_date.isoformat(),
+            end_date=end_date.isoformat() if end_date else None,
+            initial_capital=float(initial_capital),
+            transaction_cost=transaction_cost,
+            slippage=slippage,
+            benchmark=benchmark.strip() or "SPY",
+            verbose=False,
+            output_dir="output",
+        )
+
+        # Strategy-specific fields
+        if strategy_key == "adm":
+            cfg.risky_assets = _parse_list(risky) if risky.strip() else ["SPY", "SCZ"]
+            cfg.defensive_asset = defensive.strip() or "TLT"
+            if best_of.strip():
+                cfg.best_of_defensives = _parse_list(best_of)
+            cfg.momentum_windows_months = _parse_int_list(momentum_windows)
+
+        elif strategy_key == "enhanced_dm":
+            if multi_universe.strip():
+                cfg.multi_asset_universe = _parse_list(multi_universe)
+            cfg.enhanced_top_n = top_n
+            cfg.momentum_lookback_months = lookback
+
+        elif strategy_key == "managed_futures_dm":
+            if mf_risky.strip():
+                cfg.managed_futures_risky = _parse_list(mf_risky)
+            if mf_defensive.strip():
+                cfg.managed_futures_defensive = _parse_list(mf_defensive)
+            cfg.momentum_lookback_months = lookback
+
+        elif strategy_key == "vigilant_dm":
+            if v_risky.strip():
+                cfg.vigilant_risky = _parse_list(v_risky)
+            if v_def_rising.strip():
+                cfg.vigilant_defensive_rising = _parse_list(v_def_rising)
+            if v_def_falling.strip():
+                cfg.vigilant_defensive_falling = _parse_list(v_def_falling)
+            cfg.momentum_lookback_months = lookback
+
+        # Run
+        with st.spinner("Téléchargement des données et calcul en cours..."):
+            try:
+                portfolio_df, metrics = run_backtest(cfg)
+                st.session_state["results"] = (portfolio_df, metrics, cfg)
+            except Exception as e:
+                st.error(f"Erreur lors du backtest : {e}")
+                st.session_state.pop("results", None)
+                st.stop()
+
+    # ── Display results ──────────────────────────────────────────────────────
+    if "results" in st.session_state:
+        portfolio_df, metrics, cfg = st.session_state["results"]
+
+        # ── Metrics cards ──────────────────────────────────────────────────────
+        st.header("Résultats")
+        col1, col2, col3, col4, col5 = st.columns(5)
+
+        def _pct(v):
+            return f"{v:.2%}" if isinstance(v, float) else str(v)
+
+        def _ratio(v):
+            return f"{v:.3f}" if isinstance(v, float) else str(v)
+
+        with col1:
+            st.metric("CAGR", _pct(metrics.get("cagr", 0)))
+            st.metric("Rendement total", _pct(metrics.get("total_return", 0)))
+
+        with col2:
+            st.metric("Volatilité", _pct(metrics.get("volatility", 0)))
+            st.metric("Sharpe", _ratio(metrics.get("sharpe_ratio", 0)))
+
+        with col3:
+            st.metric("Sortino", _ratio(metrics.get("sortino_ratio", 0)))
+            st.metric("Calmar", _ratio(metrics.get("calmar_ratio", 0)))
+
+        with col4:
+            st.metric("Max Drawdown", _pct(metrics.get("max_drawdown", 0)))
+            st.metric(
+                "Durée DD (jours)",
+                int(metrics.get("max_drawdown_duration_days", 0)),
+            )
+
+        with col5:
+            st.metric("Trades", int(metrics.get("num_trades", 0)))
+            st.metric("Win Rate", _pct(metrics.get("win_rate", 0)))
+
+        st.markdown("---")
+
+        # ── Benchmarks comparison ─────────────────────────────────────────────
+        st.subheader("Comparaison Benchmark")
+        bcol1, bcol2, bcol3, bcol4 = st.columns(4)
+        with bcol1:
+            st.metric("Benchmark CAGR", _pct(metrics.get("bench_cagr", 0)))
+        with bcol2:
+            st.metric("Benchmark Return", _pct(metrics.get("bench_total_return", 0)))
+        with bcol3:
+            st.metric("Benchmark Vol", _pct(metrics.get("bench_volatility", 0)))
+        with bcol4:
+            st.metric("Benchmark Max DD", _pct(metrics.get("bench_max_drawdown", 0)))
+
+        st.markdown("---")
+
+        # ── Charts ────────────────────────────────────────────────────────────
+        st.header("Graphiques")
+
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(
+            ["Equity Curve", "Drawdown", "Distribution", "Heatmap", "Allocation"]
+        )
+
+        with tab1:
+            _plot_equity(portfolio_df, cfg)
+
+        with tab2:
+            _plot_drawdown(portfolio_df)
+
+        with tab3:
+            _plot_monthly_hist(portfolio_df)
+
+        with tab4:
+            _plot_heatmap(portfolio_df)
+
+        with tab5:
+            _plot_allocation(portfolio_df)
+
+        # ── Data export ──────────────────────────────────────────────────────
+        st.markdown("---")
+        st.header("Données")
+
+        csv_data = portfolio_df.to_csv().encode("utf-8")
+        st.download_button(
+            "📥 Télécharger portfolio_daily.csv",
+            data=csv_data,
+            file_name="portfolio_daily.csv",
+            mime="text/csv",
+        )
+
+        with st.expander("Afficher les données brutes"):
+            st.dataframe(portfolio_df.tail(30), use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PLOTTING FUNCTIONS
+# ══════════════════════════════════════════════════════════════════════════════
