@@ -11,7 +11,7 @@ Generates:
 
 import logging
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -38,7 +38,8 @@ COLORS = {
 }
 
 
-def generate_plots(portfolio_df: pd.DataFrame, metrics: Dict, cfg: ADMConfig) -> None:
+def generate_plots(portfolio_df: pd.DataFrame, metrics: Dict, cfg: ADMConfig,
+                   signals: Optional[pd.DataFrame] = None) -> None:
     """Generate and save all plots to *output_dir*."""
     out = Path(cfg.output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -47,7 +48,7 @@ def generate_plots(portfolio_df: pd.DataFrame, metrics: Dict, cfg: ADMConfig) ->
     _drawdown(portfolio_df, cfg, out / "02_drawdown.png")
     _monthly_histogram(portfolio_df, cfg, out / "03_monthly_histogram.png")
     _annual_heatmap(portfolio_df, cfg, out / "04_annual_heatmap.png")
-    _allocation(portfolio_df, cfg, out / "05_allocation.png")
+    _allocation(portfolio_df, cfg, out / "05_allocation.png", signals)
 
     logger.info("Plots saved to %s", out.resolve())
     plt.close("all")
@@ -171,21 +172,57 @@ def _annual_heatmap(df: pd.DataFrame, cfg: ADMConfig, path: Path) -> None:
     plt.close(fig)
 
 
-def _allocation(df: pd.DataFrame, cfg: ADMConfig, path: Path) -> None:
-    """Stacked area chart showing which asset is held over time."""
+def _allocation(df: pd.DataFrame, cfg: ADMConfig, path: Path,
+                signals: Optional[pd.DataFrame] = None) -> None:
+    """Stacked area chart showing asset allocation over time.
+
+    For single-asset strategies, uses the ``position`` column.
+    For multi-asset strategies, uses the ``signals`` weight DataFrame.
+    """
+    # Multi-asset: use signals weights directly
+    if signals is not None and "position" not in signals.columns:
+        _allocation_from_signals(signals, df, path)
+        return
+
+    # Single-asset: use position column
     positions = df["position"].dropna().unique()
     if len(positions) == 0:
         return
 
-    # Build weekly allocation matrix
     weekly = df.resample("W").last()
     alloc = pd.DataFrame(0.0, index=weekly.index, columns=positions)
     for pos in positions:
         mask = weekly["position"] == pos
         alloc.loc[mask, pos] = 1.0
 
+    _plot_allocation(alloc, path)
+
+
+def _allocation_from_signals(signal_df: pd.DataFrame, portfolio_df: pd.DataFrame,
+                              path: Path) -> None:
+    """Build allocation chart from weight-based signals."""
+    # Align signals to the portfolio date range
+    mask = (signal_df.index >= portfolio_df.index[0]) & (signal_df.index <= portfolio_df.index[-1])
+    sig = signal_df.loc[mask].copy()
+
+    # Resample weekly and average weights
+    weekly = sig.resample("W").mean()
+    # Drop zero-only columns
+    weekly = weekly.loc[:, weekly.sum() > 0]
+
+    if weekly.empty:
+        return
+
+    _plot_allocation(weekly, path)
+
+
+def _plot_allocation(alloc: pd.DataFrame, path: Path) -> None:
+    """Render a stacked area chart from a weight DataFrame."""
+    import matplotlib.ticker as mticker
+    import seaborn as sns
+
     fig, ax = plt.subplots(figsize=(12, 3.5))
-    colors_list = sns.color_palette("husl", len(positions))
+    colors_list = sns.color_palette("husl", len(alloc.columns))
     alloc.plot.area(ax=ax, color=colors_list, linewidth=0, alpha=0.85)
 
     ax.set_title("Allocation Over Time", fontsize=13, fontweight="bold")
@@ -193,7 +230,7 @@ def _allocation(df: pd.DataFrame, cfg: ADMConfig, path: Path) -> None:
     ax.set_xlabel("")
     ax.set_ylim(0, 1)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0%}"))
-    ax.legend(loc="upper right", ncol=len(positions), fontsize=8)
+    ax.legend(loc="upper right", ncol=min(len(alloc.columns), 5), fontsize=8)
     ax.grid(True, alpha=0.3)
 
     fig.tight_layout()

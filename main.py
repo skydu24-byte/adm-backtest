@@ -69,8 +69,15 @@ def _config_from_file(path: str) -> type:
 
 def main(argv: Optional[list] = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Accelerating Dual Momentum (ADM) Backtester",
+        description="Accelerating Dual Momentum (ADM) Backtester — multi-strategy",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--strategy", "-s",
+        type=str,
+        default=None,
+        choices=["adm", "enhanced_dm", "managed_futures_dm", "vigilant_dm"],
+        help="Strategy to run (overrides config file).",
     )
     parser.add_argument(
         "--config", "-c",
@@ -83,7 +90,7 @@ def main(argv: Optional[list] = None) -> None:
         type=str,
         nargs="+",
         default=[],
-        help="Override individual parameters, e.g. -p transaction_cost=0.002 momentum_windows_months='[1,3,12]'",
+        help="Override individual parameters, e.g. -p transaction_cost=0.002 initial_capital=10000",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -110,6 +117,11 @@ def main(argv: Optional[list] = None) -> None:
         logger.info("Loaded config from %s", args.config)
     else:
         cfg = ADMConfig()
+
+    # CLI strategy override
+    if args.strategy is not None:
+        cfg.strategy = args.strategy
+        logger.info("Strategy overridden: %s", cfg.strategy)
 
     # Apply overrides
     if args.params:

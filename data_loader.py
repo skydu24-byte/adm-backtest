@@ -1,37 +1,37 @@
 """
-data_loader.py — Fetch and prepare price data for ADM backtesting.
+data_loader.py — Fetch and prepare price data for backtesting.
 
 Supports two data sources:
   - Yahoo Finance (live via yfinance)
   - Local CSV files (one per ticker, columns: Date, Adj Close…)
+
+Special handling for ^TNX (10-year Treasury yield index): uses ``Close``
+instead of ``Adj Close``.
 """
 
 import logging
 from pathlib import Path
 from typing import Dict, Optional
 import pandas as pd
-import numpy as np
 
 from config import ADMConfig
 
 logger = logging.getLogger(__name__)
 
+# Tickers that are yield / rate indices (no "Adj Close" concept)
+YIELD_TICKERS = {"^TNX", "^VIX", "^GSPC", "^IXIC"}
+
 
 def load_data(cfg: ADMConfig) -> Dict[str, pd.Series]:
     """
-    Load adjusted-close prices for all tickers referenced in the config.
+    Load price / yield data for all tickers needed by the selected strategy.
 
-    Returns a dict ``{ticker: pd.Series(index=DatetimeIndex, values=adj_close)}``.
+    Returns a dict ``{ticker: pd.Series(index=DatetimeIndex, values=close)}``.
     All series share the same date index after outer-join alignment.
     """
-    # Collect all unique tickers
-    all_tickers = list(
-        set(cfg.risky_assets)
-        | {cfg.defensive_asset, cfg.benchmark, cfg.cash_asset}
-        | set(cfg.best_of_defensives)
-    )
+    all_tickers = cfg.get_universe()
 
-    raw: Dict[str, pd.DataFrame] = {}
+    raw: Dict[str, pd.Series] = {}
 
     for ticker in all_tickers:
         df = _load_single(ticker, cfg)
@@ -39,14 +39,22 @@ def load_data(cfg: ADMConfig) -> Dict[str, pd.Series]:
             logger.warning("No data for %s — skipping.", ticker)
             continue
 
-        # Use adjusted close if available, else Close
-        col = "Adj Close" if "Adj Close" in df.columns else "Close"
+        # Use Adj Close for equities, Close for yield indices / anything else
+        if ticker in YIELD_TICKERS:
+            col = "Close"
+        else:
+            col = "Adj Close" if "Adj Close" in df.columns else "Close"
+
+        if col not in df.columns:
+            logger.warning("Column '%s' not found for %s — using Close.", col, ticker)
+            col = "Close"
+
         raw[ticker] = df[col]
 
     if not raw:
         raise RuntimeError("No data could be loaded for any ticker.")
 
-    # Align all series to a common index (union of dates)
+    # Align to common index
     full_index = pd.DatetimeIndex([])
     for s in raw.values():
         full_index = full_index.union(s.dropna().index)
@@ -69,9 +77,7 @@ def _load_single(ticker: str, cfg: ADMConfig) -> pd.DataFrame:
         raise ValueError(f"Unknown data_source '{cfg.data_source}'. Use 'yahoo' or 'csv'.")
 
 
-def _from_yahoo(
-    ticker: str, start: str, end: Optional[str]
-) -> pd.DataFrame:
+def _from_yahoo(ticker: str, start: str, end: Optional[str]) -> pd.DataFrame:
     """Download from Yahoo Finance via yfinance."""
     try:
         import yfinance as yf  # type: ignore[import-untyped]
@@ -81,10 +87,12 @@ def _from_yahoo(
             "Install it with: uv pip install yfinance"
         )
 
-    df = yf.download(ticker, start=start, end=end or None, auto_adjust=False, progress=False)
+    df = yf.download(ticker, start=start, end=end or None,
+                     auto_adjust=False, progress=False)
     if df.empty:
         logger.warning("yfinance returned empty DataFrame for %s", ticker)
         return pd.DataFrame()
+
     # yfinance multi-index columns -> flatten
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
