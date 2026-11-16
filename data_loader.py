@@ -1,110 +1,59 @@
-"""
-data_loader.py — Fetch and prepare price data for backtesting.
-
-Supports two data sources:
-  - Yahoo Finance (live via yfinance)
-  - Local CSV files (one per ticker, columns: Date, Adj Close…)
-
-Special handling for ^TNX (10-year Treasury yield index): uses ``Close``
-instead of ``Adj Close``.
-"""
-
-import logging
+"""Strict input validation; no prices invented before listing or long gaps."""
 from pathlib import Path
-from typing import Dict, Optional
+import numpy as np
 import pandas as pd
 
-from config import ADMConfig
-
-logger = logging.getLogger(__name__)
-
-# Tickers that are yield / rate indices (no "Adj Close" concept)
 YIELD_TICKERS = {"^TNX", "^VIX", "^GSPC", "^IXIC"}
 
-
-def load_data(cfg: ADMConfig) -> Dict[str, pd.Series]:
-    """
-    Load price / yield data for all tickers needed by the selected strategy.
-
-    Returns a dict ``{ticker: pd.Series(index=DatetimeIndex, values=close)}``.
-    All series share the same date index after outer-join alignment.
-    """
-    all_tickers = cfg.get_universe()
-
-    raw: Dict[str, pd.Series] = {}
-
-    for ticker in all_tickers:
-        df = _load_single(ticker, cfg)
-        if df.empty:
-            logger.warning("No data for %s — skipping.", ticker)
-            continue
-
-        # Use Adj Close for equities, Close for yield indices / anything else
-        if ticker in YIELD_TICKERS:
-            col = "Close"
-        else:
-            col = "Adj Close" if "Adj Close" in df.columns else "Close"
-
-        if col not in df.columns:
-            logger.warning("Column '%s' not found for %s — using Close.", col, ticker)
-            col = "Close"
-
-        raw[ticker] = df[col]
-
-    if not raw:
-        raise RuntimeError("No data could be loaded for any ticker.")
-
-    # Align to common index
-    full_index = pd.DatetimeIndex([])
-    for s in raw.values():
-        full_index = full_index.union(s.dropna().index)
-    full_index = pd.DatetimeIndex(sorted(full_index))
-
-    out: Dict[str, pd.Series] = {}
-    for ticker, s in raw.items():
-        out[ticker] = s.reindex(full_index).ffill().bfill()
-
-    return out
-
-
-def _load_single(ticker: str, cfg: ADMConfig) -> pd.DataFrame:
-    """Load data for a single ticker from the configured source."""
-    if cfg.data_source == "yahoo":
-        return _from_yahoo(ticker, cfg.start_date, cfg.end_date)
-    elif cfg.data_source == "csv":
-        return _from_csv(ticker, cfg)
-    else:
-        raise ValueError(f"Unknown data_source '{cfg.data_source}'. Use 'yahoo' or 'csv'.")
-
-
-def _from_yahoo(ticker: str, start: str, end: Optional[str]) -> pd.DataFrame:
-    """Download from Yahoo Finance via yfinance."""
-    try:
-        import yfinance as yf  # type: ignore[import-untyped]
-    except ImportError:
-        raise ImportError(
-            "yfinance is required for live Yahoo downloads. "
-            "Install it with: uv pip install yfinance"
-        )
-
-    df = yf.download(ticker, start=start, end=end or None,
-                     auto_adjust=False, progress=False)
-    if df.empty:
-        logger.warning("yfinance returned empty DataFrame for %s", ticker)
-        return pd.DataFrame()
-
-    # yfinance multi-index columns -> flatten
+def _from_yahoo(ticker, start, end):
+    import yfinance as yf
+    df = yf.download(ticker, start=start, end=end, auto_adjust=False, progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    df.index = pd.DatetimeIndex(df.index)
     return df
 
-
-def _from_csv(ticker: str, cfg: ADMConfig) -> pd.DataFrame:
-    """Load from a local CSV file in *data_dir*."""
+def _from_csv(ticker, cfg):
     path = Path(cfg.data_dir) / f"{ticker}.csv"
-    if not path.exists():
-        logger.warning("CSV not found: %s", path)
-        return pd.DataFrame()
-    df = pd.read_csv(path, parse_dates=["Date"], index_col="Date")
-    return df
+    return pd.read_csv(path, parse_dates=["Date"], index_col="Date")
+
+def _load_single(ticker, cfg):
+    return _from_yahoo(ticker, cfg.start_date, cfg.end_date) if cfg.data_source == "yahoo" else _from_csv(ticker, cfg)
+
+def load_data(cfg):
+    cfg.validate()
+    raw = {}
+    for ticker in cfg.get_universe():
+        df = _load_single(ticker, cfg)
+        if df.empty:
+            raise ValueError(f"No data for required ticker {ticker}")
+        index = pd.DatetimeIndex(df.index)
+        if index.tz is not None:
+            index = index.tz_localize(None)
+        if index.hasnans or index.has_duplicates:
+            raise ValueError(f"Invalid or duplicate dates for {ticker}")
+        df = df.copy()
+        df.index = index
+        df = df.sort_index()
+        column = "Close" if ticker in YIELD_TICKERS else "Adj Close"
+        if column not in df:
+            raise ValueError(f"Required column {column!r} missing for {ticker}; adjusted prices are mandatory")
+        series = pd.to_numeric(df[column], errors="raise").astype(float)
+        series = series.loc[series.index >= pd.Timestamp(cfg.start_date)]
+        if cfg.end_date:
+            series = series.loc[series.index < pd.Timestamp(cfg.end_date)]
+        finite = series.dropna()
+        if finite.empty or not np.isfinite(finite).all() or ((finite <= 0).any() if ticker != cfg.rate_ticker else (finite < 0).any()):
+            raise ValueError(f"Invalid prices for {ticker}")
+        raw[ticker] = series
+    # Benchmark sessions define the executable calendar. End is exclusive.
+    calendar = raw[cfg.benchmark].dropna().index
+    if len(calendar) < 2:
+        raise ValueError("Need at least two benchmark sessions")
+    result = {}
+    for ticker, series in raw.items():
+        aligned = series.reindex(calendar.union(series.index)).sort_index()
+        # No backward fill. Limit is measured on benchmark sessions.
+        result[ticker] = aligned.reindex(calendar).ffill(limit=cfg.max_ffill_sessions)
+        if not result[ticker].notna().any():
+            raise ValueError(f"No overlapping prices for {ticker}")
+    return result
