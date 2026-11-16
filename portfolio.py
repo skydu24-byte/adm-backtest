@@ -1,212 +1,107 @@
-"""
-portfolio.py — Portfolio allocation and trade execution engine.
+"""Fractional-share close-to-close accounting, without leverage or FX.
 
-Supports two signal formats:
-  1. Single-asset: DataFrame with a ``"position"`` column (ticker name).
-  2. Multi-asset / weight-based: DataFrame with ticker-name columns
-     containing target weights (each row sums to 1.0).
+A target observed at session t's close executes at t+1's close, AFTER
+marking old holdings. Costs apply per side to actual traded notional.
+Unavailable target assets remain uninvested, explicitly reported.
 """
-
-import logging
-from typing import Dict
-import pandas as pd
 import numpy as np
+import pandas as pd
+from schedule import rebalance_dates
 
-from config import ADMConfig
-
-logger = logging.getLogger(__name__)
-
-
-def simulate(
-    prices: Dict[str, pd.Series],
-    signals: pd.DataFrame,
-    cfg: ADMConfig,
-) -> pd.DataFrame:
-    """
-    Run the portfolio simulation.
-
-    Parameters
-    ----------
-    prices : dict
-        ``{ticker: pd.Series(adj_close)}``
-    signals : pd.DataFrame
-        Either:
-        - A DataFrame with a ``"position"`` column (single-asset format)
-        - A DataFrame with ticker columns (weight format, each row sums to 1.0)
-    cfg : ADMConfig
-
-    Returns
-    -------
-    pd.DataFrame with columns:
-        date, nav, position, daily_return, monthly_return, bench_return, trade_count
-    """
-    signal_dates = signals.index
-
-    # Build combined price DataFrame
-    all_tickers = list(prices.keys())
-    price_df = pd.DataFrame({t: prices[t] for t in all_tickers})
-
-    # Detect signal format
-    if "position" in signals.columns:
-        return _simulate_single(prices, signals, cfg, price_df, signal_dates)
-    else:
-        return _simulate_weights(prices, signals, cfg, price_df, signal_dates)
-
-
-def _simulate_single(
-    prices: Dict[str, pd.Series],
-    signals: pd.DataFrame,
-    cfg: ADMConfig,
-    price_df: pd.DataFrame,
-    signal_dates: pd.DatetimeIndex,
-) -> pd.DataFrame:
-    """Original single-asset simulation (ADM-style)."""
-    asset_col = "position"
-    nav = cfg.initial_capital
-    current_position: str = cfg.cash_asset
-    trade_count = 0
-    last_nav = nav
-    bench_col = cfg.benchmark
-
-    records = []
-
-    for dt in signal_dates:
-        target = signals.loc[dt, asset_col]
-        if target is None or target not in price_df.columns:
-            target = cfg.cash_asset
-
-        # Daily return of current position
-        px = price_df.loc[dt, current_position] if current_position in price_df.columns else np.nan
-        prev_px = price_df.shift(1).loc[dt, current_position] if current_position in price_df.columns else np.nan
-
-        if pd.notna(px) and pd.notna(prev_px) and prev_px > 0:
-            daily_ret = px / prev_px - 1.0
-        else:
-            daily_ret = 0.0
-
-        nav *= (1.0 + daily_ret)
-
-        # Trade costs
-        prev_pos = signals.shift(1).loc[dt, asset_col] if dt != signal_dates[0] else None
-        if prev_pos is not None and target != prev_pos:
-            total_cost = cfg.transaction_cost + cfg.slippage
-            nav *= (1.0 - total_cost)
-            trade_count += 1
-            current_position = target
-
-        # Monthly return
-        monthly_ret = nav / last_nav - 1.0 if last_nav else 0.0
-
-        # Benchmark daily return
-        if bench_col in price_df.columns:
-            b_px = price_df.loc[dt, bench_col]
-            b_prev = price_df.shift(1).loc[dt, bench_col]
-            bench_ret = b_px / b_prev - 1.0 if pd.notna(b_px) and pd.notna(b_prev) and b_prev > 0 else 0.0
-        else:
-            bench_ret = 0.0
-
-        records.append({
-            "date": dt, "nav": nav, "position": current_position,
-            "daily_return": daily_ret, "monthly_return": monthly_ret,
-            "bench_return": bench_ret, "trade_count": trade_count,
-        })
-
-        # Month boundary
-        if dt == signal_dates[-1] or (
-            dt != signal_dates[-1]
-            and dt.month != signal_dates[signal_dates.get_loc(dt) + 1].month
-        ):
-            last_nav = nav
-
-    return pd.DataFrame(records).set_index("date")
-
-
-def _simulate_weights(
-    prices: Dict[str, pd.Series],
-    signals: pd.DataFrame,
-    cfg: ADMConfig,
-    price_df: pd.DataFrame,
-    signal_dates: pd.DatetimeIndex,
-) -> pd.DataFrame:
-    """
-    Weight-based simulation (multi-asset strategies).
-
-    *signals* has ticker columns with target weights (each row ≈ 1.0).
-    """
-    weight_tickers = [c for c in signals.columns if c in price_df.columns]
-    if not weight_tickers:
-        raise ValueError("No valid ticker columns found in weight signals.")
-
-    nav = cfg.initial_capital
-    benchmark = cfg.benchmark
-    bench_col = benchmark if benchmark in price_df.columns else None
-
-    prev_weights = {t: 0.0 for t in weight_tickers}
-    trade_count = 0
-    last_nav = nav
-
-    records = []
-
-    for dt in signal_dates:
-        target_weights = signals.loc[dt].to_dict()
-        curr_weights = {t: target_weights.get(t, 0.0) for t in weight_tickers}
-        total_w = sum(curr_weights.values())
-        if total_w > 0:
-            for t in curr_weights:
-                curr_weights[t] /= total_w  # normalise
-
-        # Daily return = weighted average of individual asset returns
-        daily_ret = 0.0
-        for t in weight_tickers:
-            w = curr_weights.get(t, 0.0)
-            if w == 0.0:
+def simulate(prices, signals, cfg):
+    cfg.validate()
+    frame = pd.DataFrame(prices).sort_index()
+    if frame.empty or frame.index.has_duplicates or not frame.index.equals(signals.index):
+        raise ValueError("Prices and signals must share a nonempty sorted unique calendar")
+    tickers = [t for t in frame if t != cfg.rate_ticker]
+    if cfg.benchmark not in tickers:
+        raise ValueError("Benchmark prices are required")
+    n = len(tickers)
+    if "position" in signals:
+        weights = pd.DataFrame(0.0, index=signals.index, columns=tickers)
+        for dt, ticker in signals["position"].items():
+            if pd.isna(ticker):
                 continue
-            px = price_df.loc[dt, t] if t in price_df.columns else np.nan
-            prev_px = price_df.shift(1).loc[dt, t] if t in price_df.columns else np.nan
-            if pd.notna(px) and pd.notna(prev_px) and prev_px > 0:
-                daily_ret += w * (px / prev_px - 1.0)
-
-        nav *= (1.0 + daily_ret)
-
-        # Trade cost: fee applied to fraction of portfolio that moved
-        turnover = sum(abs(curr_weights.get(t, 0.0) - prev_weights.get(t, 0.0)) for t in weight_tickers) / 2.0
-        if turnover > 0.001:
-            total_cost = (cfg.transaction_cost + cfg.slippage) * turnover
-            nav *= (1.0 - total_cost)
-            trade_count += 1
-        prev_weights = curr_weights
-
-        # Monthly return
-        monthly_ret = nav / last_nav - 1.0 if last_nav else 0.0
-
-        # Benchmark
-        if bench_col:
-            b_px = price_df.loc[dt, bench_col]
-            b_prev = price_df.shift(1).loc[dt, bench_col]
-            bench_ret = b_px / b_prev - 1.0 if pd.notna(b_px) and pd.notna(b_prev) and b_prev > 0 else 0.0
-        else:
-            bench_ret = 0.0
-
-        # Position summary (ticker with highest weight for display)
-        top_ticker = max(curr_weights, key=curr_weights.get) if curr_weights else cfg.cash_asset
-        top_pct = curr_weights.get(top_ticker, 0.0)
-        position_str = f"{top_ticker}({top_pct:.0%})" if top_pct < 0.95 else top_ticker
-
-        records.append({
-            "date": dt,
-            "nav": nav,
-            "position": position_str,
-            "daily_return": daily_ret,
-            "monthly_return": monthly_ret,
-            "bench_return": bench_ret,
-            "trade_count": trade_count,
-        })
-
-        # Month boundary
-        if dt == signal_dates[-1] or (
-            dt != signal_dates[-1]
-            and dt.month != signal_dates[signal_dates.get_loc(dt) + 1].month
-        ):
-            last_nav = nav
-
-    return pd.DataFrame(records).set_index("date")
+            if ticker not in tickers:
+                raise ValueError(f"Unknown target ticker: {ticker}")
+            weights.loc[dt, ticker] = 1.0
+    else:
+        unknown = set(signals) - set(tickers) - {"__rebalance__"}
+        if unknown:
+            raise ValueError(f"Unknown signal columns: {unknown}")
+        weights = signals.reindex(columns=tickers, fill_value=0.0).astype(float)
+    target_array = weights.to_numpy()
+    if not np.isfinite(target_array).all() or (target_array < 0).any() or (target_array.sum(axis=1) > 1 + 1e-10).any():
+        raise ValueError("Target weights must be finite, nonnegative and sum to <= 1")
+    scheduled = signals["__rebalance__"].fillna(False).to_numpy(dtype=bool) if "__rebalance__" in signals else signals.index.isin(rebalance_dates(signals.index, cfg.rebalance_freq))
+    px = frame[tickers].to_numpy(dtype=float)
+    qty = np.zeros(n)
+    cash = float(cfg.initial_capital)
+    previous_nav = cash
+    rate = cfg.transaction_cost + cfg.slippage
+    records = []
+    trade_count = 0
+    benchmark_idx = tickers.index(cfg.benchmark)
+    for i, dt in enumerate(frame.index):
+        valid = np.isfinite(px[i]) & (px[i] > 0)
+        if ((qty > 1e-12) & ~valid).any():
+            raise ValueError(f"Cannot value a held asset at {dt}; missing/stale price")
+        values = qty * np.where(valid, px[i], 0.0)
+        before = float(cash + values.sum())
+        fee = 0.0
+        turnover = 0.0
+        order_count = 0
+        unavailable = 0.0
+        if i > 0 and scheduled[i - 1]:
+            target = target_array[i - 1].copy()
+            unavailable = float(target[~valid].sum())
+            target[~valid] = 0.0
+            if rate:
+                lo, hi = 0.0, before
+                for _ in range(64):
+                    mid = (lo + hi) / 2
+                    if mid + rate * np.abs(mid * target - values).sum() > before:
+                        hi = mid
+                    else:
+                        lo = mid
+                after = (lo + hi) / 2
+            else:
+                after = before
+            desired = after * target
+            orders = desired - values
+            notional = float(np.abs(orders).sum())
+            fee = rate * notional
+            order_count = int((np.abs(orders) > max(before * 1e-10, 1e-9)).sum())
+            turnover = notional / before if before else 0.0
+            if order_count:
+                trade_count += 1
+            qty = np.divide(desired, px[i], out=np.zeros(n), where=valid)
+            values = desired
+            cash = before - fee - float(desired.sum())
+            if cash < -max(before * 1e-10, 1e-8):
+                raise ArithmeticError("Negative cash after trade")
+            cash = max(cash, 0.0)
+        nav = float(cash + values.sum())
+        if nav <= 0 or not np.isfinite(nav):
+            raise ArithmeticError("Invalid portfolio value")
+        bench_ret = 0.0
+        if i:
+            b0, b1 = px[i - 1, benchmark_idx], px[i, benchmark_idx]
+            if not np.isfinite([b0, b1]).all() or min(b0, b1) <= 0:
+                raise ValueError("Invalid benchmark prices")
+            bench_ret = b1 / b0 - 1.0
+        actual = values / nav
+        parts = {t: w for t, w in zip(tickers, actual) if w > 1e-9}
+        if cash / nav > 1e-9:
+            parts["CASH"] = cash / nav
+        position = ", ".join(f"{t}({w:.1%})" for t, w in parts.items())
+        record = {"date": dt, "nav": nav, "position": position, "daily_return": nav / previous_nav - 1.0, "bench_return": bench_ret, "trade_count": trade_count, "orders": order_count, "fees": fee, "turnover": turnover, "unavailable_target_weight": unavailable, "weight_CASH": cash / nav}
+        record.update({f"weight_{t}": float(w) for t, w in zip(tickers, actual)})
+        records.append(record)
+        previous_nav = nav
+    out = pd.DataFrame(records).set_index("date")
+    month = out.index.to_period("M")
+    month_start = out["nav"].shift().groupby(month).transform("first")
+    month_start.loc[month == month[0]] = cfg.initial_capital
+    out["monthly_return"] = out["nav"] / month_start - 1.0
+    return out

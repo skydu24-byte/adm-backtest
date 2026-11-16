@@ -1,49 +1,16 @@
-"""
-export.py — Export backtest results to CSV.
-"""
-
-import logging
+"""Export actual holdings and net performance, including partial months."""
 from pathlib import Path
-from typing import Dict
 import pandas as pd
+from metrics import monthly_returns
 
-from config import ADMConfig
-
-logger = logging.getLogger(__name__)
-
-
-def export_results(portfolio_df: pd.DataFrame, metrics: Dict, cfg: ADMConfig) -> None:
-    """Write portfolio holdings and performance data to CSV."""
+def export_results(portfolio_df, metrics, cfg):
     out = Path(cfg.output_dir)
     out.mkdir(parents=True, exist_ok=True)
-
-    # ── Daily portfolio log ────────────────────────────────────────────────
-    export_df = portfolio_df.copy()
-    export_df = export_df.round(6)
-    path_daily = out / "portfolio_daily.csv"
-    export_df.to_csv(path_daily)
-    logger.info("Daily portfolio log → %s", path_daily.resolve())
-
-    # ── Monthly summary ────────────────────────────────────────────────────
-    monthly = portfolio_df["nav"].resample("ME").last()
-    monthly_ret = monthly.pct_change().dropna()
-    monthly_df = pd.DataFrame({
-        "nav": monthly,
-        "monthly_return": monthly_ret,
-    })
-    path_monthly = out / "portfolio_monthly.csv"
-    monthly_df.to_csv(path_monthly)
-    logger.info("Monthly summary → %s", path_monthly.resolve())
-
-    # ── Allocation table ───────────────────────────────────────────────────
-    # Monthly snapshot of position
-    alloc = portfolio_df["position"].resample("ME").last().to_frame()
-    path_alloc = out / "allocations_monthly.csv"
-    alloc.to_csv(path_alloc)
-    logger.info("Monthly allocations → %s", path_alloc.resolve())
-
-    # ── Metrics summary ────────────────────────────────────────────────────
-    metrics_df = pd.DataFrame([metrics])
-    path_metrics = out / "performance_metrics.csv"
-    metrics_df.to_csv(path_metrics, index=False)
-    logger.info("Performance metrics → %s", path_metrics.resolve())
+    portfolio_df.to_csv(out / "portfolio_daily.csv")
+    grouped = portfolio_df.groupby(portfolio_df.index.to_period("M"))
+    monthly = grouped["nav"].last().to_frame()
+    monthly["monthly_return"] = monthly_returns(portfolio_df)
+    monthly.to_csv(out / "portfolio_monthly.csv")
+    columns = [c for c in portfolio_df if c.startswith("weight_")]
+    grouped[columns].last().to_csv(out / "allocations_monthly.csv")
+    pd.DataFrame([metrics]).to_csv(out / "performance_metrics.csv", index=False)

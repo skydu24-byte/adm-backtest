@@ -1,123 +1,47 @@
-"""
-metrics.py — Performance metrics computation.
-
-Produces a dictionary of standard risk/return statistics from the
-portfolio equity curve and the benchmark.
-"""
-
-import logging
-from typing import Dict
-import pandas as pd
+"""Metrics use net returns consistently; undefined ratios are NaN."""
 import numpy as np
+import pandas as pd
 
-from config import ADMConfig
+def monthly_returns(portfolio_df):
+    returns = portfolio_df["daily_return"]
+    # Includes partial first/last months; these are explicitly documented.
+    return returns.add(1).groupby(returns.index.to_period("M")).prod().sub(1)
 
-logger = logging.getLogger(__name__)
+def _max_drawdown_duration(drawdown):
+    start = drawdown.index[0]
+    longest = 0
+    for dt, value in drawdown.items():
+        if value >= -1e-14:
+            start = dt
+        else:
+            longest = max(longest, (dt - start).days)
+    return int(longest)
 
+def _stats(nav, returns, initial, years):
+    total = nav.iloc[-1] / initial - 1
+    cagr = (1 + total) ** (1 / years) - 1 if years > 0 else np.nan
+    # Omit only the initial baseline row, not a potential initial loss.
+    r = returns.iloc[1:] if returns.iloc[0] == 0 else returns
+    std = r.std(ddof=1)
+    vol = std * np.sqrt(252)
+    sharpe = r.mean() / std * np.sqrt(252) if std > 0 else np.nan
+    downside = np.sqrt(np.mean(np.minimum(r, 0) ** 2)) * np.sqrt(252)
+    sortino = r.mean() * 252 / downside if downside > 0 else np.nan
+    peak = nav.cummax().clip(lower=initial)
+    dd = nav / peak - 1
+    return {"total_return": total, "cagr": cagr, "volatility": vol, "sharpe_ratio": sharpe, "sortino_ratio": sortino, "max_drawdown": dd.min(), "max_drawdown_duration_days": _max_drawdown_duration(dd), "calmar_ratio": cagr / abs(dd.min()) if dd.min() < 0 else np.nan}
 
-def compute_metrics(portfolio_df: pd.DataFrame, cfg: ADMConfig) -> Dict:
-    """
-    Calculate all performance metrics from the portfolio simulation results.
-
-    Parameters
-    ----------
-    portfolio_df : pd.DataFrame
-        Must have columns ``nav``, ``daily_return``, ``bench_return``,
-        ``monthly_return``, ``trade_count``.
-    cfg : ADMConfig
-
-    Returns
-    -------
-    dict with keys:
-        total_return, cagr, volatility, sharpe_ratio, sortino_ratio,
-        max_drawdown, max_drawdown_duration, num_trades,
-        avg_holding_months, win_rate, calmar_ratio,
-        bench_total_return, bench_cagr, bench_volatility, bench_max_drawdown
-    """
+def compute_metrics(portfolio_df, cfg):
+    if len(portfolio_df) < 2:
+        raise ValueError("At least two sessions are required for metrics")
     nav = portfolio_df["nav"]
-    daily_ret = portfolio_df["daily_return"]
-    bench_ret = portfolio_df["bench_return"]
-
-    total_days = len(nav)
-    years = total_days / 252.0  # approximate trading days / year
-
-    # ── Portfolio metrics ─────────────────────────────────────────────────
-    total_return = nav.iloc[-1] / cfg.initial_capital - 1.0
-
-    cagr = (nav.iloc[-1] / cfg.initial_capital) ** (1.0 / years) - 1.0 if years > 0 else 0.0
-
-    # Annualised volatility (daily returns → annual: * sqrt(252))
-    vol = daily_ret.std() * np.sqrt(252)
-
-    # Risk-free rate (approximate 0 for Sharpe — user can adjust)
-    rf = 0.0
-
-    excess_daily = daily_ret - rf / 252.0
-    sharpe = excess_daily.mean() / daily_ret.std() * np.sqrt(252) if daily_ret.std() > 0 else 0.0
-
-    # Sortino (downside deviation only)
-    downside = daily_ret[daily_ret < 0]
-    downside_std = downside.std() * np.sqrt(252) if len(downside) > 0 else 0.0
-    sortino = (daily_ret.mean() - rf / 252.0) / daily_ret.std() * np.sqrt(252) if daily_ret.std() > 0 else 0.0
-    # More proper Sortino:
-    annualised_excess = (daily_ret.mean() - rf / 252.0) * 252
-    sortino_proper = annualised_excess / downside_std if downside_std > 0 else 0.0
-
-    # Max drawdown
-    peak = nav.expanding().max()
-    drawdown = (nav - peak) / peak
-    max_dd = drawdown.min()
-    max_dd_duration = _max_drawdown_duration(drawdown)
-
-    # Calmar
-    calmar = cagr / abs(max_dd) if max_dd != 0 else 0.0
-
-    # Trade statistics
-    num_trades = portfolio_df["trade_count"].iloc[-1]
-    # Average holding period: total days / (trades + 1) → months
-    avg_holding_days = total_days / max(num_trades + 1, 1)
-    avg_holding_months = avg_holding_days / 21.0
-
-    # Win rate (months where monthly_return > 0)
-    monthly_rets = portfolio_df["monthly_return"].dropna()
-    win_rate = (monthly_rets > 0).sum() / len(monthly_rets) if len(monthly_rets) > 0 else 0.0
-
-    # ── Benchmark metrics ─────────────────────────────────────────────────
-    bench_price = (1.0 + bench_ret).cumprod()
-    bench_total_return = bench_price.iloc[-1] - 1.0
-    bench_cagr = (bench_price.iloc[-1]) ** (1.0 / years) - 1.0 if years > 0 else 0.0
-    bench_vol = bench_ret.std() * np.sqrt(252)
-    bench_peak = bench_price.expanding().max()
-    bench_dd = (bench_price - bench_peak) / bench_peak
-    bench_max_dd = bench_dd.min()
-
-    final = {
-        "total_return": total_return,
-        "cagr": cagr,
-        "volatility": vol,
-        "sharpe_ratio": sharpe,
-        "sortino_ratio": sortino_proper,
-        "max_drawdown": max_dd,
-        "max_drawdown_duration_days": max_dd_duration,
-        "calmar_ratio": calmar,
-        "num_trades": num_trades,
-        "avg_holding_months": avg_holding_months,
-        "win_rate": win_rate,
-        "bench_total_return": bench_total_return,
-        "bench_cagr": bench_cagr,
-        "bench_volatility": bench_vol,
-        "bench_max_drawdown": bench_max_dd,
-    }
-
-    return final
-
-
-def _max_drawdown_duration(drawdown: pd.Series) -> int:
-    """Longest period (in days) the portfolio stayed below previous peak."""
-    is_underwater = drawdown < 0
-    if not is_underwater.any():
-        return 0
-    # Length of each underwater streak
-    streaks = (is_underwater != is_underwater.shift()).cumsum()
-    durations = is_underwater.groupby(streaks).sum()
-    return int(durations.max())
+    years = (nav.index[-1] - nav.index[0]).total_seconds() / (365.25 * 86400)
+    result = _stats(nav, portfolio_df["daily_return"], cfg.initial_capital, years)
+    bench = portfolio_df["bench_return"].add(1).cumprod()
+    result.update({"bench_" + key: value for key, value in _stats(bench, portfolio_df["bench_return"], 1.0, years).items()})
+    monthly = monthly_returns(portfolio_df)
+    result["win_rate"] = float((monthly > 0).mean())
+    result["num_trades"] = int(portfolio_df["trade_count"].iloc[-1])
+    result["total_fees"] = float(portfolio_df["fees"].sum()) if "fees" in portfolio_df else np.nan
+    result["unavailable_target_events"] = int((portfolio_df.get("unavailable_target_weight", pd.Series(dtype=float)) > 0).sum())
+    return result

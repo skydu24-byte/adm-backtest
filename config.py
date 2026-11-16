@@ -1,209 +1,92 @@
-"""
-config.py — Simulation parameters for all portfolio strategies.
-
-All settings are grouped into a single dataclass with sensible defaults,
-validated on construction.  The *strategy* field selects which signal
-engine to use.
-"""
-
+"""Validated parameters. All prices must use the same reporting currency."""
 from dataclasses import dataclass, field
 from typing import List, Optional
-
+import math
+import pandas as pd
 
 @dataclass
 class ADMConfig:
-    # ── Strategy selector ──────────────────────────────────────────────────
     strategy: str = "adm"
-    """
-    Which strategy to run.  Options:
-      - "adm"               : Accelerating Dual Momentum (original)
-      - "enhanced_dm"       : Enhanced Dual Momentum — multi-asset, 12m momentum, top-N
-      - "managed_futures_dm": Managed Futures Dual Momentum — KMLM/DBMF replaces TLT
-      - "vigilant_dm"       : Vigilant Dual Momentum — rate-aware hedge selection
-    """
-
-    # ── Universe ──────────────────────────────────────────────────────────────
-    risky_assets: List[str] = field(
-        default_factory=lambda: ["SPY", "SCZ"]
-    )
-    """Tickers of the risky assets (at least 2 for ADM comparison)."""
-
+    risky_assets: List[str] = field(default_factory=lambda: ["SPY", "SCZ"])
     defensive_asset: str = "TLT"
-    """Single defensive asset ticker, e.g. TLT, BND, SHY."""
-
     best_of_defensives: List[str] = field(default_factory=list)
-    """
-    If non-empty, the defensive choice is the one with the best 1-month return
-    among these tickers (overrides *defensive_asset*).  Typical use:
-    ["TLT", "TIP"].
-    """
-
-    # ── Enhanced / Managed-Futures DM universe ────────────────────────────
-    multi_asset_universe: List[str] = field(
-        default_factory=lambda: [
-            "SPY", "QQQ", "GLD", "DBC", "VNQ", "KMLM", "SHY", "BIL"
-        ]
-    )
-    """Asset pool for enhanced_dm strategy."""
-
-    managed_futures_risky: List[str] = field(
-        default_factory=lambda: ["SPY", "VEA"]
-    )
-    """Equity assets for managed_futures_dm."""
-
-    managed_futures_defensive: List[str] = field(
-        default_factory=lambda: ["KMLM", "DBMF", "FLOT", "BIL"]
-    )
-    """Defensive assets for managed_futures_dm (replaces TLT)."""
-
-    vigilant_risky: List[str] = field(
-        default_factory=lambda: ["SPY", "VEA"]
-    )
-    """Equity assets for vigilant_dm."""
-
-    vigilant_defensive_rising: List[str] = field(
-        default_factory=lambda: ["SHY", "GLD", "BIL", "USFR"]
-    )
-    """Safe havens when rates are rising."""
-
-    vigilant_defensive_falling: List[str] = field(
-        default_factory=lambda: ["TLT", "GLD", "SHY", "IEF"]
-    )
-    """Safe havens when rates are falling."""
-
+    multi_asset_universe: List[str] = field(default_factory=lambda: ["SPY", "QQQ", "GLD", "DBC", "VNQ", "KMLM", "SHY", "BIL"])
+    managed_futures_risky: List[str] = field(default_factory=lambda: ["SPY", "VEA"])
+    managed_futures_defensive: List[str] = field(default_factory=lambda: ["KMLM", "DBMF", "FLOT", "BIL"])
+    vigilant_risky: List[str] = field(default_factory=lambda: ["SPY", "VEA"])
+    vigilant_defensive_rising: List[str] = field(default_factory=lambda: ["SHY", "GLD", "BIL", "USFR"])
+    vigilant_defensive_falling: List[str] = field(default_factory=lambda: ["TLT", "GLD", "SHY", "IEF"])
     rate_ticker: str = "^TNX"
-    """Ticker for the 10-year Treasury yield (used by vigilant_dm)."""
-
     benchmark: str = "SPY"
-    """Benchmark ticker for comparison charts and metrics."""
-
     cash_asset: str = "BIL"
-    """Fallback cash-like asset."""
-
-    # ── Momentum windows (in months) ─────────────────────────────────────────
-    momentum_windows_months: List[int] = field(
-        default_factory=lambda: [1, 3, 6]
-    )
-    """
-    Periods (in months) used to compute total returns that feed the score.
-    For ADM: [1, 3, 6] by default.
-    For other strategies, only the first value is used as the 12m lookback
-    equivalent (configurable).
-    """
-
-    # ── Enhanced DM specific ────────────────────────────────────────────────
+    momentum_windows_months: List[int] = field(default_factory=lambda: [1, 3, 6])
     enhanced_top_n: int = 4
-    """Number of top assets to hold in enhanced_dm (default: 4)."""
-
     momentum_lookback_months: int = 12
-    """Primary momentum lookback in months for non-ADM strategies."""
-
-    # ── Rebalancing ──────────────────────────────────────────────────────────
     rebalance_freq: str = "ME"
-    """Pandas offset string — 'ME' for month-end, 'W' for weekly, etc."""
-
     sleeve_rebalance: bool = False
-    """
-    If True, split the month into two rebalance dates (1st and 15th)
-    to reduce date-bias (half-rebalancing).
-    """
-
-    # ── Costs ────────────────────────────────────────────────────────────────
     transaction_cost: float = 0.001
-    """One-way trading cost as a fraction (0.001 = 0.1 %)."""
-
     slippage: float = 0.0005
-    """Slippage as a fraction (0.0005 = 0.05 %)."""
-
     tax_rate: float = 0.0
-    """Flat tax rate on realised gains (0.0 = no tax)."""
-
-    # ── Data ──────────────────────────────────────────────────────────────────
     start_date: str = "2000-01-01"
-    """Earliest date to load."""
-
     end_date: Optional[str] = None
-    """Latest date to load (None = today)."""
-
     data_source: str = "yahoo"
-    """'yahoo' (live download via yfinance) or 'csv' (local files)."""
-
     data_dir: str = "data"
-    """Directory containing CSV files when data_source='csv'."""
-
-    # ── Misc ──────────────────────────────────────────────────────────────────
     initial_capital: float = 100_000.0
-    """Starting portfolio value."""
-
     verbose: bool = True
-    """Print progress messages during backtest."""
-
-    # ── Output ────────────────────────────────────────────────────────────────
     output_dir: str = "output"
-    """Directory for charts and exported CSV."""
+    max_ffill_sessions: int = 5
 
-    def __post_init__(self) -> None:
-        """Validate configuration."""
-        valid_strategies = {"adm", "enhanced_dm", "managed_futures_dm", "vigilant_dm"}
-        if self.strategy not in valid_strategies:
-            raise ValueError(
-                f"Unknown strategy '{self.strategy}'. "
-                f"Choose from {sorted(valid_strategies)}."
-            )
+    def __post_init__(self):
+        self.validate()
 
+    def validate(self):
+        if self.strategy not in {"adm", "enhanced_dm", "managed_futures_dm", "vigilant_dm"}:
+            raise ValueError(f"Unknown strategy: {self.strategy}")
+        for key in ("risky_assets", "multi_asset_universe", "managed_futures_risky", "managed_futures_defensive", "vigilant_risky", "vigilant_defensive_rising", "vigilant_defensive_falling", "best_of_defensives"):
+            value = getattr(self, key)
+            if not isinstance(value, list) or any(not isinstance(t, str) or not t.strip() for t in value) or len(value) != len(set(value)):
+                raise ValueError(f"{key} must be a list of unique nonempty tickers")
+            if key != "best_of_defensives" and not value:
+                raise ValueError(f"{key} cannot be empty")
         if self.strategy == "adm" and len(self.risky_assets) < 2:
-            raise ValueError(
-                "ADM requires at least 2 risky assets, "
-                f"got {len(self.risky_assets)}."
-            )
-
-        for w in self.momentum_windows_months:
-            if w < 1:
-                raise ValueError(
-                    f"Momentum window must be >= 1 month, got {w}."
-                )
-        if self.momentum_lookback_months < 1:
-            raise ValueError(
-                f"momentum_lookback_months must be >= 1, "
-                f"got {self.momentum_lookback_months}."
-            )
-        if self.transaction_cost < 0:
-            raise ValueError(
-                f"transaction_cost must be >= 0, got {self.transaction_cost}."
-            )
-        if self.slippage < 0:
-            raise ValueError(
-                f"slippage must be >= 0, got {self.slippage}."
-            )
+            raise ValueError("ADM requires at least 2 risky assets")
+        for key in ("defensive_asset", "rate_ticker", "benchmark", "cash_asset"):
+            if not isinstance(getattr(self, key), str) or not getattr(self, key).strip():
+                raise ValueError(f"{key} must be a nonempty ticker")
+        if not isinstance(self.momentum_windows_months, list) or not self.momentum_windows_months:
+            raise ValueError("momentum_windows_months cannot be empty")
+        for value in [*self.momentum_windows_months, self.momentum_lookback_months, self.enhanced_top_n, self.max_ffill_sessions]:
+            if type(value) is not int or value < 1:
+                raise ValueError("Windows, top N and fill limit must be positive integers")
+        for key in ("transaction_cost", "slippage", "tax_rate", "initial_capital"):
+            value = getattr(self, key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"{key} must be a finite nonnegative number")
         if self.initial_capital <= 0:
-            raise ValueError(
-                f"initial_capital must be > 0, got {self.initial_capital}."
-            )
-        if self.enhanced_top_n < 1:
-            raise ValueError(
-                f"enhanced_top_n must be >= 1, got {self.enhanced_top_n}."
-            )
+            raise ValueError("initial_capital must be > 0")
+        if self.transaction_cost + self.slippage >= 1:
+            raise ValueError("Combined per-side costs must be < 1")
+        if self.tax_rate != 0:
+            raise ValueError("tax_rate is not implemented; use 0 (pre-tax simulation)")
+        if self.sleeve_rebalance:
+            raise ValueError("Independent half-portfolio sleeves are not implemented")
+        if self.rebalance_freq not in {"M", "ME", "W", "W-FRI"}:
+            raise ValueError("rebalance_freq must be ME, W or W-FRI (M is an alias)")
+        if self.data_source not in {"yahoo", "csv"}:
+            raise ValueError("data_source must be yahoo or csv")
+        start = pd.Timestamp(self.start_date)
+        end = pd.Timestamp(self.end_date) if self.end_date else None
+        if pd.isna(start) or (end is not None and (pd.isna(end) or end <= start)):
+            raise ValueError("end_date must be after start_date")
 
-    def get_universe(self) -> List[str]:
-        """Return the list of all tickers needed for the selected strategy."""
+    def get_universe(self):
         base = [self.benchmark, self.cash_asset]
-
         if self.strategy == "adm":
-            return list(set(base + self.risky_assets
-                            + [self.defensive_asset]
-                            + self.best_of_defensives))
-
+            extra = self.risky_assets + [self.defensive_asset] + self.best_of_defensives
         elif self.strategy == "enhanced_dm":
-            return list(set(base + self.multi_asset_universe))
-
+            extra = self.multi_asset_universe
         elif self.strategy == "managed_futures_dm":
-            return list(set(base + self.managed_futures_risky
-                            + self.managed_futures_defensive))
-
-        elif self.strategy == "vigilant_dm":
-            return list(set(base + self.vigilant_risky
-                            + self.vigilant_defensive_rising
-                            + self.vigilant_defensive_falling
-                            + [self.rate_ticker]))
-
-        return base
+            extra = self.managed_futures_risky + self.managed_futures_defensive
+        else:
+            extra = self.vigilant_risky + self.vigilant_defensive_rising + self.vigilant_defensive_falling + [self.rate_ticker]
+        return sorted(set(base + extra))
