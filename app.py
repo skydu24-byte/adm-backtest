@@ -1,454 +1,79 @@
-"""
-app.py — Streamlit GUI for the ADM Backtester.
-
-Usage:
-    streamlit run app.py
-"""
-
-import streamlit as st
+"""Streamlit front end. Run: streamlit run app.py."""
+from datetime import date
+import calendar
 import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
 import plotly.express as px
-from plotly.subplots import make_subplots
-from datetime import datetime
-import logging
-import sys
-import os
-
-# ── Project imports ──────────────────────────────────────────────────────────
-sys.path.insert(0, os.path.dirname(__file__))
+import streamlit as st
 from config import ADMConfig
-from backtest import run as run_backtest
+from backtest import run
+from metrics import monthly_returns
 
-# ── Suppress non-critical logs ───────────────────────────────────────────────
-logging.getLogger().setLevel(logging.WARNING)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PAGE CONFIG
-# ══════════════════════════════════════════════════════════════════════════════
-
-st.set_page_config(
-    page_title="ADM Backtester",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-st.title("📈 ADM Backtester — Multi-Strategy")
-st.markdown("Configurez les paramètres ci-dessous et lancez un backtest.")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR — PARAMETERS
-# ══════════════════════════════════════════════════════════════════════════════
-
-st.sidebar.header("Stratégie")
-
-STRATEGY_LABELS = {
-    "adm": "ADM (Accelerating Dual Momentum)",
-    "enhanced_dm": "Enhanced Dual Momentum",
-    "managed_futures_dm": "Managed Futures Dual Momentum",
-    "vigilant_dm": "Vigilant Dual Momentum",
-}
-
-strategy_key = st.sidebar.selectbox(
-    "Stratégie",
-    options=list(STRATEGY_LABELS.keys()),
-    format_func=lambda k: STRATEGY_LABELS[k],
-    index=0,
-)
-
-# ── Period ───────────────────────────────────────────────────────────────────
-st.sidebar.header("Période")
-start_date = st.sidebar.date_input("Début", datetime(2000, 1, 1))
-end_date = st.sidebar.date_input("Fin", datetime.today())
-
-# ── Capital ──────────────────────────────────────────────────────────────────
-st.sidebar.header("Capital")
-initial_capital = st.sidebar.number_input(
-    "Capital initial (€)", min_value=1_000, value=100_000, step=10_000,
-    format="%d"
-)
-
-# ── Costs ────────────────────────────────────────────────────────────────────
-st.sidebar.header("Coûts")
-transaction_cost = st.sidebar.slider(
-    "Frais de transaction", 0.0, 0.01, 0.001, step=0.0005, format="%.3f"
-)
-slippage = st.sidebar.slider(
-    "Slippage", 0.0, 0.005, 0.0005, step=0.0005, format="%.3f"
-)
-
-# ── Strategy-specific parameters ────────────────────────────────────────────
-st.sidebar.header("Paramètres Avancés")
-
-if strategy_key == "adm":
-    risky = st.sidebar.text_input(
-        "Actifs risqués (séparés par des virgules)", "SPY, SCZ"
-    )
-    defensive = st.sidebar.text_input(
-        "Actif défensif", "TLT"
-    )
-    best_of = st.sidebar.text_input(
-        "Best-of défensifs (optionnel, virgules)", ""
-    )
-    momentum_windows = st.sidebar.text_input(
-        "Fenêtres momentum (mois)", "1, 3, 6"
-    )
-
-elif strategy_key == "enhanced_dm":
-    multi_universe = st.sidebar.text_input(
-        "Univers d'actifs (virgules)",
-        "SPY, QQQ, GLD, DBC, VNQ, KMLM, SHY, BIL",
-    )
-    top_n = st.sidebar.slider("Top N actifs à détenir", 1, 6, 4)
-    lookback = st.sidebar.slider("Lookback momentum (mois)", 3, 24, 12)
-
-elif strategy_key == "managed_futures_dm":
-    mf_risky = st.sidebar.text_input("Actifs risqués (virgules)", "SPY, VEA")
-    mf_defensive = st.sidebar.text_input("Actifs défensifs (virgules)", "KMLM, DBMF, FLOT, BIL")
-    lookback = st.sidebar.slider("Lookback momentum (mois)", 3, 24, 12)
-
-elif strategy_key == "vigilant_dm":
-    v_risky = st.sidebar.text_input("Actifs risqués (virgules)", "SPY, VEA")
-    v_def_rising = st.sidebar.text_input("Défensifs taux montants (virgules)", "SHY, GLD, BIL, USFR")
-    v_def_falling = st.sidebar.text_input("Défensifs taux baissiers (virgules)", "TLT, GLD, SHY, IEF")
-    lookback = st.sidebar.slider("Lookback momentum (mois)", 3, 24, 12)
-
-# ── Benchmark ────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="Momentum Backtester", layout="wide")
+st.title("Momentum Backtester")
+st.caption("Simulation avant impots, sans conversion de devises. Signal a la cloture, execution a la cloture de la seance suivante.")
+st.warning("Les performances historiques ne constituent pas une prevision. Les mois partiels sont inclus dans les statistiques mensuelles.")
+strategy = st.sidebar.selectbox("Strategie", ["adm", "enhanced_dm", "managed_futures_dm", "vigilant_dm"])
+start = st.sidebar.date_input("Debut", date(2000, 1, 1))
+end = st.sidebar.date_input("Fin exclusive", date.today())
+capital = st.sidebar.number_input("Capital initial (devise des prix, pas de conversion EUR)", min_value=1000.0, value=100000.0)
+fee = st.sidebar.number_input("Frais par cote (fraction, 0.001 = 0.1 %)", min_value=0.0, max_value=0.1, value=0.001, format="%.4f")
+slip = st.sidebar.number_input("Slippage par cote (fraction)", min_value=0.0, max_value=0.1, value=0.0005, format="%.4f")
 benchmark = st.sidebar.text_input("Benchmark", "SPY")
+freq = st.sidebar.selectbox("Reallocation", ["ME", "W-FRI"])
+lookback = st.sidebar.number_input("Lookback hors ADM (mois)", min_value=1, value=12)
+top_n = st.sidebar.number_input("Top N (Enhanced)", min_value=1, value=4)
 
-# ── Run button ───────────────────────────────────────────────────────────────
-st.sidebar.markdown("---")
-run_btn = st.sidebar.button("🚀 Lancer le backtest", type="primary", use_container_width=True)
+def ticks(label, default):
+    return [t.strip() for t in st.sidebar.text_input(label, default).split(",") if t.strip()]
 
+extra = {}
+if strategy == "adm":
+    extra["risky_assets"] = ticks("Actifs risques", "SPY,SCZ")
+    extra["defensive_asset"] = st.sidebar.text_input("Defensif", "TLT")
+    extra["best_of_defensives"] = ticks("Defensifs best-of (optionnel)", "")
+    windows_text = st.sidebar.text_input("Fenetres ADM (mois)", "1,3,6")
+elif strategy == "enhanced_dm":
+    extra["multi_asset_universe"] = ticks("Univers", "SPY,QQQ,GLD,DBC,VNQ,KMLM,SHY,BIL")
+elif strategy == "managed_futures_dm":
+    extra["managed_futures_risky"] = ticks("Actifs risques", "SPY,VEA")
+    extra["managed_futures_defensive"] = ticks("Actifs defensifs", "KMLM,DBMF,FLOT,BIL")
+else:
+    extra["vigilant_risky"] = ticks("Actifs risques", "SPY,VEA")
+    extra["vigilant_defensive_rising"] = ticks("Defensifs taux montants", "SHY,GLD,BIL,USFR")
+    extra["vigilant_defensive_falling"] = ticks("Defensifs taux baissiers", "TLT,GLD,SHY,IEF")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# HELPER: parse comma-separated string to list
-# ══════════════════════════════════════════════════════════════════════════════
+if st.sidebar.button("Lancer le backtest", type="primary"):
+    st.session_state.pop("results", None)
+    try:
+        if strategy == "adm":
+            extra["momentum_windows_months"] = [int(x.strip()) for x in windows_text.split(",")]
+        cfg = ADMConfig(strategy=strategy, start_date=start.isoformat(), end_date=end.isoformat(), initial_capital=capital, transaction_cost=fee, slippage=slip, benchmark=benchmark.strip(), rebalance_freq=freq, momentum_lookback_months=int(lookback), enhanced_top_n=int(top_n), verbose=False, **extra)
+        with st.spinner("Chargement et calcul..."):
+            df, metrics = run(cfg)
+        st.session_state["results"] = (df, metrics, cfg)
+    except Exception as exc:
+        st.error(str(exc))
 
-def _parse_list(text: str) -> list:
-    return [t.strip() for t in text.split(",") if t.strip()]
-
-
-def _parse_int_list(text: str) -> list:
-    return [int(t.strip()) for t in text.split(",") if t.strip()]
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# BUILD CONFIG & RUN
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-def _plot_equity(df: pd.DataFrame, cfg: ADMConfig):
-    """Equity curve: portfolio vs benchmark."""
-    port = df["nav"] / df["nav"].iloc[0] * 100
-    bench = (1.0 + df["bench_return"]).cumprod() * 100
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=port.index, y=port.values,
-        name="ADM Portfolio", line=dict(color="#2196F3", width=2),
-    ))
-    fig.add_trace(go.Scatter(
-        x=bench.index, y=bench.values,
-        name=f"Benchmark ({cfg.benchmark})",
-        line=dict(color="#9E9E9E", width=1.5, dash="dash"),
-    ))
-    fig.update_layout(
-        title="Equity Curve — Portefeuille vs Benchmark",
-        yaxis_title="Croissance de 100",
-        hovermode="x unified",
-        height=450,
-        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def _plot_drawdown(df: pd.DataFrame):
-    """Drawdown over time."""
-    nav = df["nav"]
-    peak = nav.expanding().max()
-    dd = (nav - peak) / peak * 100
-
-    min_idx = dd.idxmin()
-    min_val = dd.min()
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=dd.index, y=dd.values,
-        fill="tozeroy", name="Drawdown",
-        line=dict(color="#FF5722", width=1.5),
-        fillcolor="rgba(255,87,34,0.15)",
-    ))
-    fig.add_annotation(
-        x=min_idx, y=min_val,
-        text=f"Max: {min_val:.1f}%",
-        showarrow=True, arrowhead=1, ax=40, ay=-40,
-    )
-    fig.update_layout(
-        title="Drawdown",
-        yaxis_title="Drawdown (%)",
-        hovermode="x unified", height=350,
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def _plot_monthly_hist(df: pd.DataFrame):
-    """Distribution of monthly returns."""
-    monthly = df["nav"].resample("ME").last().pct_change().dropna() * 100
-    mean_ret = monthly.mean()
-
-    fig = go.Figure()
-    fig.add_trace(go.Histogram(
-        x=monthly.values,
-        nbinsx=max(int(len(monthly) ** 0.5), 15),
-        marker_color="#2196F3",
-        opacity=0.8,
-        name="Mensuel",
-    ))
-    fig.add_vline(x=0, line_dash="dash", line_color="black", line_width=1)
-    fig.add_vline(
-        x=mean_ret, line_color="#4CAF50", line_width=2,
-        annotation_text=f"Moy: {mean_ret:.2f}%",
-    )
-    fig.update_layout(
-        title="Distribution des Rendements Mensuels",
-        xaxis_title="Rendement mensuel (%)",
-        yaxis_title="Fréquence",
-        hovermode="x", height=350,
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def _plot_heatmap(df: pd.DataFrame):
-    """Annual heatmap of monthly returns."""
-    nav = df["nav"]
-    monthly = nav.resample("ME").last().pct_change().dropna() * 100
-    years = monthly.index.year
-    months = monthly.index.month
-    pivot = pd.DataFrame({"ret": monthly.values, "year": years, "month": months})
-    table = pivot.pivot_table(
-        index="year", columns="month", values="ret", aggfunc="first"
-    )
-    table.columns = ["Jan", "Fév", "Mar", "Avr", "Mai", "Juin",
-                      "Juil", "Août", "Sep", "Oct", "Nov", "Déc"]
-
-    vmax = max(abs(table.min().min()), abs(table.max().max()), 3)
-
-    fig = go.Figure(data=go.Heatmap(
-        z=table.values,
-        x=table.columns,
-        y=table.index.astype(str),
-        colorscale="RdYlGn",
-        zmid=0,
-        zmin=-vmax,
-        zmax=vmax,
-        text=table.values.round(1).astype(str),
-        texttemplate="%{text}",
-        hovertemplate="%{y} - %{x}: %{z:.1f}%<extra></extra>",
-    ))
-    fig.update_layout(
-        title="Rendements Mensuels — Heatmap Calendaire (%)",
-        height=max(350, len(table) * 30 + 100),
-        xaxis_side="top",
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def _plot_allocation(df: pd.DataFrame):
-    """Allocation timeline (single asset) or portfolio composition."""
-    if "position" not in df.columns:
-        st.info("Données d'allocation non disponibles.")
-        return
-
-    positions = df["position"].dropna().unique()
-    if len(positions) == 0:
-        st.info("Aucune donnée d'allocation.")
-        return
-
-    weekly = df.resample("W").last()
-    alloc = pd.DataFrame(0.0, index=weekly.index, columns=positions)
-    for pos in positions:
-        mask = weekly["position"] == pos
-        alloc.loc[mask, pos] = 1.0
-
-    # Colors
-    colors = px.colors.qualitative.Set2 * (len(positions) // len(px.colors.qualitative.Set2) + 1)
-
-    fig = go.Figure()
-    for i, pos in enumerate(alloc.columns):
-        fig.add_trace(go.Scatter(
-            x=alloc.index, y=alloc[pos],
-            name=pos, mode="none",
-            stackgroup="one",
-            line=dict(width=0.5),
-            fillcolor=colors[i % len(colors)],
-            hovertemplate=f"%{{x}}<br>{pos}: %{{y:.0%}}<extra></extra>",
-        ))
-
-    fig.update_layout(
-        title="Allocation au Fil du Temps",
-        yaxis_title="Poids",
-        yaxis=dict(tickformat=".0%", range=[0, 1]),
-        hovermode="x unified",
-        height=350,
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
-        ),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-if run_btn or "results" in st.session_state:
-
-    if run_btn:
-        # Build config from sidebar
-        cfg = ADMConfig(
-            strategy=strategy_key,
-            start_date=start_date.isoformat(),
-            end_date=end_date.isoformat() if end_date else None,
-            initial_capital=float(initial_capital),
-            transaction_cost=transaction_cost,
-            slippage=slippage,
-            benchmark=benchmark.strip() or "SPY",
-            verbose=False,
-            output_dir="output",
-        )
-
-        # Strategy-specific fields
-        if strategy_key == "adm":
-            cfg.risky_assets = _parse_list(risky) if risky.strip() else ["SPY", "SCZ"]
-            cfg.defensive_asset = defensive.strip() or "TLT"
-            if best_of.strip():
-                cfg.best_of_defensives = _parse_list(best_of)
-            cfg.momentum_windows_months = _parse_int_list(momentum_windows)
-
-        elif strategy_key == "enhanced_dm":
-            if multi_universe.strip():
-                cfg.multi_asset_universe = _parse_list(multi_universe)
-            cfg.enhanced_top_n = top_n
-            cfg.momentum_lookback_months = lookback
-
-        elif strategy_key == "managed_futures_dm":
-            if mf_risky.strip():
-                cfg.managed_futures_risky = _parse_list(mf_risky)
-            if mf_defensive.strip():
-                cfg.managed_futures_defensive = _parse_list(mf_defensive)
-            cfg.momentum_lookback_months = lookback
-
-        elif strategy_key == "vigilant_dm":
-            if v_risky.strip():
-                cfg.vigilant_risky = _parse_list(v_risky)
-            if v_def_rising.strip():
-                cfg.vigilant_defensive_rising = _parse_list(v_def_rising)
-            if v_def_falling.strip():
-                cfg.vigilant_defensive_falling = _parse_list(v_def_falling)
-            cfg.momentum_lookback_months = lookback
-
-        # Run
-        with st.spinner("Téléchargement des données et calcul en cours..."):
-            try:
-                portfolio_df, metrics = run_backtest(cfg)
-                st.session_state["results"] = (portfolio_df, metrics, cfg)
-            except Exception as e:
-                st.error(f"Erreur lors du backtest : {e}")
-                st.session_state.pop("results", None)
-                st.stop()
-
-    # ── Display results ──────────────────────────────────────────────────────
-    if "results" in st.session_state:
-        portfolio_df, metrics, cfg = st.session_state["results"]
-
-        # ── Metrics cards ──────────────────────────────────────────────────────
-        st.header("Résultats")
-        col1, col2, col3, col4, col5 = st.columns(5)
-
-        def _pct(v):
-            return f"{v:.2%}" if isinstance(v, float) else str(v)
-
-        def _ratio(v):
-            return f"{v:.3f}" if isinstance(v, float) else str(v)
-
-        with col1:
-            st.metric("CAGR", _pct(metrics.get("cagr", 0)))
-            st.metric("Rendement total", _pct(metrics.get("total_return", 0)))
-
-        with col2:
-            st.metric("Volatilité", _pct(metrics.get("volatility", 0)))
-            st.metric("Sharpe", _ratio(metrics.get("sharpe_ratio", 0)))
-
-        with col3:
-            st.metric("Sortino", _ratio(metrics.get("sortino_ratio", 0)))
-            st.metric("Calmar", _ratio(metrics.get("calmar_ratio", 0)))
-
-        with col4:
-            st.metric("Max Drawdown", _pct(metrics.get("max_drawdown", 0)))
-            st.metric(
-                "Durée DD (jours)",
-                int(metrics.get("max_drawdown_duration_days", 0)),
-            )
-
-        with col5:
-            st.metric("Trades", int(metrics.get("num_trades", 0)))
-            st.metric("Win Rate", _pct(metrics.get("win_rate", 0)))
-
-        st.markdown("---")
-
-        # ── Benchmarks comparison ─────────────────────────────────────────────
-        st.subheader("Comparaison Benchmark")
-        bcol1, bcol2, bcol3, bcol4 = st.columns(4)
-        with bcol1:
-            st.metric("Benchmark CAGR", _pct(metrics.get("bench_cagr", 0)))
-        with bcol2:
-            st.metric("Benchmark Return", _pct(metrics.get("bench_total_return", 0)))
-        with bcol3:
-            st.metric("Benchmark Vol", _pct(metrics.get("bench_volatility", 0)))
-        with bcol4:
-            st.metric("Benchmark Max DD", _pct(metrics.get("bench_max_drawdown", 0)))
-
-        st.markdown("---")
-
-        # ── Charts ────────────────────────────────────────────────────────────
-        st.header("Graphiques")
-
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(
-            ["Equity Curve", "Drawdown", "Distribution", "Heatmap", "Allocation"]
-        )
-
-        with tab1:
-            _plot_equity(portfolio_df, cfg)
-
-        with tab2:
-            _plot_drawdown(portfolio_df)
-
-        with tab3:
-            _plot_monthly_hist(portfolio_df)
-
-        with tab4:
-            _plot_heatmap(portfolio_df)
-
-        with tab5:
-            _plot_allocation(portfolio_df)
-
-        # ── Data export ──────────────────────────────────────────────────────
-        st.markdown("---")
-        st.header("Données")
-
-        csv_data = portfolio_df.to_csv().encode("utf-8")
-        st.download_button(
-            "📥 Télécharger portfolio_daily.csv",
-            data=csv_data,
-            file_name="portfolio_daily.csv",
-            mime="text/csv",
-        )
-
-        with st.expander("Afficher les données brutes"):
-            st.dataframe(portfolio_df.tail(30), use_container_width=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PLOTTING FUNCTIONS
-# ══════════════════════════════════════════════════════════════════════════════
+if "results" in st.session_state:
+    df, metrics, cfg = st.session_state["results"]
+    st.caption(f"Resultats memorises : {cfg.strategy}, {cfg.start_date} -> {cfg.end_date}. Relancer pour appliquer les parametres modifies.")
+    columns = st.columns(4)
+    for col, key in zip(columns, ["cagr", "total_return", "max_drawdown", "win_rate"]):
+        col.metric(key, f"{metrics[key]:.2%}")
+    st.dataframe(pd.DataFrame([metrics]))
+    if metrics["unavailable_target_events"]:
+        st.warning("Des cibles n'avaient pas de prix disponible : leur poids est reste en liquidites non remunerees. Voir unavailable_target_weight dans le CSV.")
+    curves = pd.DataFrame({"Portefeuille net": df.nav / cfg.initial_capital * 100, cfg.benchmark: df.bench_return.add(1).cumprod() * 100})
+    st.plotly_chart(px.line(curves, title="Croissance de 100"), use_container_width=True)
+    dd = (df.nav / df.nav.cummax().clip(lower=cfg.initial_capital) - 1) * 100
+    st.plotly_chart(px.area(dd, title="Drawdown (%)"), use_container_width=True)
+    monthly = monthly_returns(df) * 100
+    st.plotly_chart(px.histogram(x=monthly.values, labels={"x": "Rendement mensuel net (%)"}), use_container_width=True)
+    table = pd.DataFrame({"year": monthly.index.year, "month": monthly.index.month, "return": monthly.values}).pivot(index="year", columns="month", values="return").reindex(columns=range(1, 13))
+    table.columns = list(calendar.month_abbr)[1:]
+    st.dataframe(table.style.format("{:.2f}", na_rep=""))
+    weights = df.filter(like="weight_").copy()
+    weights.columns = weights.columns.str.removeprefix("weight_")
+    st.plotly_chart(px.area(weights.loc[:, weights.max() > 0], title="Allocations effectivement detenues"), use_container_width=True)
+    st.download_button("Exporter le portefeuille quotidien", df.to_csv().encode(), file_name="portfolio_daily.csv", mime="text/csv")
+    st.dataframe(df.tail(30))
